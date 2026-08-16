@@ -1,31 +1,31 @@
 import sqlite3
 import json
 import hashlib
-import os
+import time
 
 DB_NAME = "client_tasks.db"
-SALT = "smarttask_secure_salt_2026"  # Соль для защиты паролей
+SALT = "smarttask_secure_salt_2026"
 
 def hash_password(password: str) -> str:
-    """Безопасное хеширование пароля с солью (SHA-256)"""
     return hashlib.sha256((password + SALT).encode('utf-8')).hexdigest()
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # 1. Таблица пользователей
+    # 1. Пользователи
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             ai_credits INTEGER DEFAULT 5,
-            is_pro INTEGER DEFAULT 0
+            is_pro INTEGER DEFAULT 0,
+            focus_seconds INTEGER DEFAULT 0
         )
     """)
     
-    # 2. Таблица задач с привязкой к user_id
+    # 2. Задачи
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,57 +34,65 @@ def init_db():
             is_done INTEGER DEFAULT 0,
             subtasks TEXT DEFAULT '[]',
             energy TEXT DEFAULT 'medium',
+            created_at REAL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
+
+    # 3. Заметки и конспекты с картинками
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            image_path TEXT,
+            created_at REAL,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     """)
     conn.commit()
     conn.close()
 
-# --- АВТОРИЗАЦИЯ И РЕГИСТРАЦИЯ ---
-
+# --- AUTH ---
 def register_user(username, password):
-    """Регистрация нового пользователя"""
-    if len(username.strip()) < 3:
-        return False, "Username must be at least 3 characters"
-    if len(password.strip()) < 8:
-        return False, "Password must be at least 8 characters"
-    
+    if len(username.strip()) < 3: return False, "Username too short"
+    if len(password.strip()) < 4: return False, "Password too short"
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO users (username, password_hash, ai_credits, is_pro) VALUES (?, ?, 5, 0)",
-            (username.strip().lower(), hash_password(password))
-        )
-        user_id = cursor.lastrowid
+        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username.strip().lower(), hash_password(password)))
+        uid = cursor.lastrowid
         conn.commit()
         conn.close()
-        return True, user_id
+        return True, uid
     except sqlite3.IntegrityError:
         conn.close()
-        return False, "Username already exists! Choose another."
+        return False, "Username already exists!"
 
 def login_user(username, password):
-    """Проверка логина и пароля"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, username, ai_credits, is_pro FROM users WHERE username = ? AND password_hash = ?",
-        (username.strip().lower(), hash_password(password))
-    )
+    cursor.execute("SELECT id, username, ai_credits, is_pro, focus_seconds FROM users WHERE username = ? AND password_hash = ?", (username.strip().lower(), hash_password(password)))
     row = cursor.fetchone()
     conn.close()
-    if row:
-        return {"id": row[0], "username": row[1], "credits": row[2], "is_pro": bool(row[3])}
+    if row: return {"id": row[0], "username": row[1], "credits": row[2], "is_pro": bool(row[3]), "focus_seconds": row[4]}
     return None
 
 def get_user_profile(user_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT ai_credits, is_pro FROM users WHERE id = ?", (user_id,))
+    cursor.execute("SELECT ai_credits, is_pro, focus_seconds FROM users WHERE id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return {"credits": row[0], "is_pro": bool(row[1])} if row else {"credits": 0, "is_pro": False}
+    return {"credits": row[0], "is_pro": bool(row[1]), "focus_seconds": row[2]} if row else {"credits": 0, "is_pro": False, "focus_seconds": 0}
+
+def add_focus_time(user_id, seconds):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET focus_seconds = focus_seconds + ? WHERE id = ?", (seconds, user_id))
+    conn.commit()
+    conn.close()
 
 def deduct_credit(user_id):
     conn = sqlite3.connect(DB_NAME)
@@ -100,13 +108,14 @@ def set_pro(user_id):
     conn.commit()
     conn.close()
 
-# --- ОПЕРАЦИИ С ЗАДАЧАМИ ---
-
-def get_tasks(user_id, energy_filter=None):
+# --- TASKS ---
+def get_tasks(user_id, filter_type="all"):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    if energy_filter and energy_filter != "all":
-        cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks WHERE user_id = ? AND energy = ? ORDER BY id DESC", (user_id, energy_filter))
+    if filter_type == "completed":
+        cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks WHERE user_id = ? AND is_done = 1 ORDER BY id DESC", (user_id,))
+    elif filter_type in ["high", "medium", "zombie"]:
+        cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks WHERE user_id = ? AND energy = ? ORDER BY id DESC", (user_id, filter_type))
     else:
         cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks WHERE user_id = ? ORDER BY id DESC", (user_id,))
     rows = cursor.fetchall()
@@ -116,7 +125,7 @@ def get_tasks(user_id, energy_filter=None):
 def add_task(user_id, title, energy="medium"):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO tasks (user_id, title, subtasks, energy) VALUES (?, ?, ?, ?)", (user_id, title, json.dumps([]), energy))
+    cursor.execute("INSERT INTO tasks (user_id, title, subtasks, energy, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, title, json.dumps([]), energy, time.time()))
     task_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -140,5 +149,37 @@ def delete_task(task_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+
+# --- NOTES WITH IMAGES ---
+def add_note(user_id, title, content, image_path=None):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO notes (user_id, title, content, image_path, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, title, content, image_path, time.time()))
+    note_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return note_id
+
+def get_notes(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, content, image_path FROM notes WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"id": r[0], "title": r[1], "content": r[2], "image_path": r[3]} for r in rows]
+
+def delete_note(note_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    conn.commit()
+    conn.close()
+
+def update_note(note_id, title, content, image_path=None):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE notes SET title = ?, content = ?, image_path = ? WHERE id = ?", (title, content, image_path, note_id))
     conn.commit()
     conn.close()
