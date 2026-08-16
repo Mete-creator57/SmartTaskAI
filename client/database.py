@@ -6,18 +6,15 @@ DB_NAME = "client_tasks.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # Таблица задач
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             is_done INTEGER DEFAULT 0,
-            subtasks TEXT DEFAULT '[]'
+            subtasks TEXT DEFAULT '[]',
+            energy TEXT DEFAULT 'medium'
         )
     """)
-    
-    # Таблица профиля (AI кредиты)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS profile (
             id INTEGER PRIMARY KEY,
@@ -25,23 +22,25 @@ def init_db():
             is_pro INTEGER DEFAULT 0
         )
     """)
-    
     cursor.execute("INSERT OR IGNORE INTO profile (id, ai_credits, is_pro) VALUES (1, 5, 0)")
     conn.commit()
     conn.close()
 
-def get_tasks():
+def get_tasks(energy_filter=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, is_done, subtasks FROM tasks ORDER BY id DESC")
+    if energy_filter and energy_filter != "all":
+        cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks WHERE energy = ? ORDER BY id DESC", (energy_filter,))
+    else:
+        cursor.execute("SELECT id, title, is_done, subtasks, energy FROM tasks ORDER BY id DESC")
     rows = cursor.fetchall()
     conn.close()
-    return [{"id": r[0], "title": r[1], "is_done": bool(r[2]), "subtasks": json.loads(r[3])} for r in rows]
+    return [{"id": r[0], "title": r[1], "is_done": bool(r[2]), "subtasks": json.loads(r[3]), "energy": r[4]} for r in rows]
 
-def add_task(title):
+def add_task(title, energy="medium"):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO tasks (title, subtasks) VALUES (?, ?)", (title, json.dumps([])))
+    cursor.execute("INSERT INTO tasks (title, subtasks, energy) VALUES (?, ?, ?)", (title, json.dumps([]), energy))
     task_id = cursor.lastrowid
     conn.commit()
     conn.close()
